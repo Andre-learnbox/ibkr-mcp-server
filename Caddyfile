@@ -4,21 +4,19 @@
 #  Template: __DOMAIN__ wird beim Start durch sed ersetzt.
 #  {env.MCP_SECRET_TOKEN} wird von Caddy zur Laufzeit aufgelöst.
 #
-#  Routing-Logik (vereinfacht, ohne route-Blöcke):
-#   1. Erst DENY prüfen (unauthorized → 401)
-#   2. Dann PROXY für erlaubte Requests
-#   3. Alles andere → 404
+#  Routing-Reihenfolge (Reihenfolge ist in Caddy entscheidend!):
+#   1. @mcp_deny   → 401 wenn /mcp (exkl. /mcpo) ohne Auth
+#   2. @mcpo_deny  → 401 wenn /mcpo ohne Bearer
+#   3. handle /mcpo* → proxy mcpo:8001  (VOR /mcp* – wichtig!)
+#   4. handle /mcp*  → proxy ibkr-mcp-server:8000
+#   5. handle {}     → 404 für alles andere
 # ═══════════════════════════════════════════════════════════════
 
 __DOMAIN__ {
 
-    # ── Logging ───────────────────────────────────────────────
+    # ── Logging (stdout – Docker-kompatibel, kein Verzeichnis nötig)
     log {
-        output file /var/log/caddy/access.log {
-            roll_size     50mb
-            roll_keep     5
-            roll_keep_for 720h
-        }
+        output stdout
         format json
         level  INFO
     }
@@ -32,13 +30,17 @@ __DOMAIN__ {
     }
 
     # ═══════════════════════════════════════════════════════════
-    #  /mcp* – DENY: weder Anthropic-IP noch gültiger Bearer
+    #  DENY /mcp* (exkl. /mcpo*): weder Anthropic-IP noch Bearer
+    #
+    #  "not path /mcpo*" verhindert, dass dieser Matcher
+    #  fälschlicherweise auch /mcpo-Requests trifft.
     #
     #  Anthropic Egress-IPs (Claude.ai):
     #  https://docs.claude.com/en/api/ip-addresses
     # ═══════════════════════════════════════════════════════════
     @mcp_deny {
-        path /mcp*
+        path     /mcp*
+        not path /mcpo*
         not remote_ip 160.79.104.0/21
         not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
     }
@@ -47,7 +49,7 @@ __DOMAIN__ {
     }
 
     # ═══════════════════════════════════════════════════════════
-    #  /mcpo* – DENY: kein gültiger Bearer-Token
+    #  DENY /mcpo*: kein gültiger Bearer-Token
     # ═══════════════════════════════════════════════════════════
     @mcpo_deny {
         path /mcpo*
@@ -58,16 +60,10 @@ __DOMAIN__ {
     }
 
     # ═══════════════════════════════════════════════════════════
-    #  /mcp* – PROXY zu ibkr-mcp-server (nach Auth-Check)
+    #  PROXY /mcpo* → mcpo:8001 (OpenAPI für Open-WebUI)
     #
-    #  Erlaubt: Anthropic-IPs (Claude.ai) + Bearer-Token-Träger
-    # ═══════════════════════════════════════════════════════════
-    handle /mcp* {
-        reverse_proxy ibkr-mcp-server:8000
-    }
-
-    # ═══════════════════════════════════════════════════════════
-    #  /mcpo* – PROXY zu mcpo (OpenAPI für Open-WebUI)
+    #  MUSS vor handle /mcp* stehen! /mcpo startet mit /mcp,
+    #  daher würde es sonst an den falschen Backend weitergeleitet.
     #
     #  In Open-WebUI eintragen:
     #    Type: OpenAPI
@@ -79,6 +75,18 @@ __DOMAIN__ {
         reverse_proxy mcpo:8001
     }
 
+    # ═══════════════════════════════════════════════════════════
+    #  PROXY /mcp* → ibkr-mcp-server:8000
+    #
+    #  Erlaubt: Anthropic-IPs (Claude.ai) + gültiger Bearer-Token
+    #  (Perplexity, OpenAI API)
+    # ═══════════════════════════════════════════════════════════
+    handle /mcp* {
+        reverse_proxy ibkr-mcp-server:8000
+    }
+
     # ── Alles andere → 404 ───────────────────────────────────
-    respond "Not Found" 404
+    handle {
+        respond "Not Found" 404
+    }
 }

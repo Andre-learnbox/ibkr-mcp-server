@@ -2,8 +2,7 @@
   "mcpServers": {
     "ibkr": {
       "type": "streamable-http",
-      "url": "http://ibkr-mcp-server:8000/mcp",
-      "_comment": "Interner Docker-Netzwerkname. NICHT localhost oder 127.0.0.1 verwenden!"
+      "url": "http://ibkr-mcp-server:8000/mcp"
     }
   }
 }
