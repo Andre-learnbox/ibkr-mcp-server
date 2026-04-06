@@ -546,6 +546,87 @@ async def get_trades_history() -> list[dict[str, Any]]:
         ]
 
 
+@mcp.tool()
+async def place_option_order(
+    symbol: str,
+    right: str,
+    strike: float,
+    expiry: str,
+    action: str,
+    quantity: int,
+    order_type: str = "LMT",
+    limit_price: float | None = None,
+    tif: str = "DAY",
+    account: str = "",
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> dict[str, Any]:
+    """Place a single-leg options order (requires TRADING_ENABLED=true).
+
+    Args:
+        symbol:      Underlying ticker (e.g. "SPY")
+        right:       "C" (call) or "P" (put)
+        strike:      Strike price (e.g. 655.0)
+        expiry:      Expiry date YYYYMMDD (e.g. "20260501")
+        action:      "BUY" or "SELL"
+        quantity:    Number of contracts
+        order_type:  "LMT" | "MKT" | "STP"  (default: LMT)
+        limit_price: Limit price in USD – required for LMT / STP
+        tif:         "DAY" | "GTC"  (default: DAY)
+        account:     Account ID (e.g. "DU8111665"), optional
+        exchange:    default "SMART"
+        currency:    default "USD"
+    """
+    _require_trading()
+
+    right      = right.upper()
+    action     = action.upper()
+    order_type = order_type.upper()
+
+    if right not in ("C", "P"):
+        raise ValueError(f"right must be C or P, got: {right!r}")
+    if action not in ("BUY", "SELL"):
+        raise ValueError(f"action must be BUY or SELL, got: {action!r}")
+    if order_type in ("LMT", "STP") and limit_price is None:
+        raise ValueError(f"limit_price is required for {order_type} orders")
+
+    async with _ib_connect() as ibc:
+        contract = ib.Option(symbol, expiry, strike, right, exchange, currency=currency)
+        details = await ibc.reqContractDetailsAsync(contract)
+        if not details:
+            raise RuntimeError(f"No option contract found: {symbol} {expiry} {strike}{right}")
+        qualified = details[0].contract
+
+        order = ib.Order(
+            action=action,
+            totalQuantity=quantity,
+            orderType=order_type,
+            tif=tif,
+        )
+        if limit_price is not None:
+            order.lmtPrice = limit_price
+        if account:
+            order.account = account
+
+        trade = ibc.placeOrder(qualified, order)
+        await asyncio.sleep(1)
+
+        return {
+            "orderId":    trade.order.orderId,
+            "status":     trade.orderStatus.status,
+            "symbol":     symbol,
+            "right":      right,
+            "strike":     strike,
+            "expiry":     expiry,
+            "action":     action,
+            "quantity":   quantity,
+            "orderType":  order_type,
+            "limitPrice": limit_price,
+            "tif":        tif,
+            "conid":      qualified.conId,
+        }
+
+
 # ===========================================================================
 # Entry point  –  must be LAST so all @mcp.tool() decorators run first
 # ===========================================================================
