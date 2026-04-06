@@ -1,24 +1,16 @@
 # ═══════════════════════════════════════════════════════════════
 #  Caddyfile – IBKR MCP Stack
 #
-#  WICHTIG: Diese Datei ist ein Template!
-#  Der Platzhalter __DOMAIN__ wird beim Container-Start durch
-#  die DOMAIN-Umgebungsvariable ersetzt (via sed im entrypoint).
+#  Template: __DOMAIN__ wird beim Start durch sed ersetzt.
+#  {env.MCP_SECRET_TOKEN} wird von Caddy zur Laufzeit aufgelöst.
 #
-#  {env.MCP_SECRET_TOKEN} funktioniert direkt in Caddy-Direktiven
-#  (nicht im Site-Block-Label), daher dieser gemischte Ansatz.
-#
-#  Sicherheitskonzept:
-#  /mcp*   → Anthropic-IPs (Claude.ai) ODER Bearer-Token
-#             → Claude.ai, Perplexity, OpenAI API
-#  /mcpo*  → Nur Bearer-Token → Open-WebUI via OpenAPI
-#  Alles andere → 404
+#  Routing-Logik (vereinfacht, ohne route-Blöcke):
+#   1. Erst DENY prüfen (unauthorized → 401)
+#   2. Dann PROXY für erlaubte Requests
+#   3. Alles andere → 404
 # ═══════════════════════════════════════════════════════════════
 
 __DOMAIN__ {
-
-    # ── TLS (automatisch via Let's Encrypt) ───────────────────
-    # Caddy holt das Zertifikat automatisch wenn DOMAIN gesetzt ist
 
     # ── Logging ───────────────────────────────────────────────
     log {
@@ -40,68 +32,53 @@ __DOMAIN__ {
     }
 
     # ═══════════════════════════════════════════════════════════
-    #  ENDPUNKT 1: /mcp  (direkter MCP Streamable HTTP)
+    #  /mcp* – DENY: weder Anthropic-IP noch gültiger Bearer
     #
-    #  Erlaubt:
-    #   a) Anthropic-Egress-IPs  → Claude.ai (kein Token nötig)
-    #      Quelle: https://docs.claude.com/en/api/ip-addresses
-    #   b) Gültiger Bearer-Token → Perplexity, OpenAI API
+    #  Anthropic Egress-IPs (Claude.ai):
+    #  https://docs.claude.com/en/api/ip-addresses
     # ═══════════════════════════════════════════════════════════
-    route /mcp* {
-
-        @anthropic_ip remote_ip 160.79.104.0/21
-
-        @valid_bearer header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
-
-        @unauthorized {
-            not remote_ip 160.79.104.0/21
-            not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
-        }
-
-        # Claude.ai: via Anthropic-IP durchlassen
-        handle @anthropic_ip {
-            reverse_proxy ibkr-mcp-server:8000
-        }
-
-        # Perplexity / OpenAI API: via Bearer-Token
-        handle @valid_bearer {
-            reverse_proxy ibkr-mcp-server:8000
-        }
-
-        # Alles andere: 401
-        handle @unauthorized {
-            respond "Unauthorized" 401
-        }
+    @mcp_deny {
+        path /mcp*
+        not remote_ip 160.79.104.0/21
+        not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
+    }
+    handle @mcp_deny {
+        respond "Unauthorized" 401
     }
 
     # ═══════════════════════════════════════════════════════════
-    #  ENDPUNKT 2: /mcpo  (OpenAPI via MCPO für Open-WebUI)
+    #  /mcpo* – DENY: kein gültiger Bearer-Token
+    # ═══════════════════════════════════════════════════════════
+    @mcpo_deny {
+        path /mcpo*
+        not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
+    }
+    handle @mcpo_deny {
+        respond "Unauthorized" 401
+    }
+
+    # ═══════════════════════════════════════════════════════════
+    #  /mcp* – PROXY zu ibkr-mcp-server (nach Auth-Check)
     #
-    #  Nur mit Bearer-Token erreichbar.
-    #  In Open-WebUI als "OpenAPI Tool Server" eintragen:
+    #  Erlaubt: Anthropic-IPs (Claude.ai) + Bearer-Token-Träger
+    # ═══════════════════════════════════════════════════════════
+    handle /mcp* {
+        reverse_proxy ibkr-mcp-server:8000
+    }
+
+    # ═══════════════════════════════════════════════════════════
+    #  /mcpo* – PROXY zu mcpo (OpenAPI für Open-WebUI)
+    #
+    #  In Open-WebUI eintragen:
+    #    Type: OpenAPI
     #    URL:  https://__DOMAIN__/mcpo/ibkr
     #    Auth: Bearer → MCP_SECRET_TOKEN
     # ═══════════════════════════════════════════════════════════
-    route /mcpo* {
-
-        @valid_bearer header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
-
-        @unauthorized {
-            not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
-        }
-
-        handle @valid_bearer {
-            uri strip_prefix /mcpo
-            reverse_proxy mcpo:8001
-        }
-
-        handle @unauthorized {
-            respond "Unauthorized" 401
-        }
+    handle /mcpo* {
+        uri strip_prefix /mcpo
+        reverse_proxy mcpo:8001
     }
 
-    # ── Alle anderen Pfade: 404 ───────────────────────────────
-    handle {
-        respond "Not Found" 404
-    }
+    # ── Alles andere → 404 ───────────────────────────────────
+    respond "Not Found" 404
 }
