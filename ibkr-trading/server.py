@@ -3,7 +3,7 @@ IB MCP Server – Extended Edition
 Based on ghcr.io/hellek1/ib-mcp (read-only tools) + Trading Extensions.
 
 Safety model:
-  READ_ONLY_API=yes    → all write tools blocked at Gateway / Caddy layer
+  READ_ONLY_API=yes     → all write tools blocked at Gateway / Caddy layer
   TRADING_ENABLED=false → all write tools raise an error in server.py
   Both flags are independent; set both for maximum protection.
 """
@@ -26,27 +26,32 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration – stored in a mutable dict so main() can override via CLI
+# without Python's global/use-before-declare restrictions.
 # ---------------------------------------------------------------------------
-IB_HOST      = os.getenv("IB_HOST", "127.0.0.1")
-IB_PORT      = int(os.getenv("IB_PORT", "7497"))
-IB_CLIENT_ID = int(os.getenv("IB_CLIENT_ID", "1"))
+_cfg: dict[str, Any] = {
+    "host":      os.getenv("IB_HOST", "127.0.0.1"),
+    "port":      int(os.getenv("IB_PORT", "7497")),
+    "client_id": int(os.getenv("IB_CLIENT_ID", "1")),
+}
 
-_TRADING_ENABLED_RAW = os.getenv("TRADING_ENABLED", "false").strip().lower()
-TRADING_ENABLED = _TRADING_ENABLED_RAW in ("true", "yes", "1")
+TRADING_ENABLED: bool = os.getenv("TRADING_ENABLED", "false").strip().lower() in (
+    "true", "yes", "1"
+)
 
 # ---------------------------------------------------------------------------
-# IB connection helper (async context manager)
+# IB connection helper
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def _ib_connect() -> AsyncGenerator[ib.IB, None]:
     """Async context manager: connect, yield, disconnect."""
     client = ib.IB()
-    await client.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+    await client.connectAsync(_cfg["host"], _cfg["port"], clientId=_cfg["client_id"])
     try:
         yield client
     finally:
         client.disconnect()
+
 
 # ---------------------------------------------------------------------------
 # FastMCP app
@@ -90,7 +95,11 @@ async def lookup_contract(
 
 
 @mcp.tool()
-async def ticker_to_conid(symbol: str, exchange: str = "", currency: str = "") -> dict[str, Any]:
+async def ticker_to_conid(
+    symbol: str,
+    exchange: str = "",
+    currency: str = "",
+) -> dict[str, Any]:
     """Convert ticker symbol to IBKR contract ID (conid)."""
     result = await lookup_contract(symbol, exchange, currency)
     if "error" in result:
@@ -165,14 +174,23 @@ async def get_historical_data(
             formatDate=1,
         )
         return [
-            {"date": b.date, "open": b.open, "high": b.high,
-             "low": b.low, "close": b.close, "volume": b.volume}
+            {
+                "date":   b.date,
+                "open":   b.open,
+                "high":   b.high,
+                "low":    b.low,
+                "close":  b.close,
+                "volume": b.volume,
+            }
             for b in bars
         ]
 
 
 @mcp.tool()
-async def get_fundamental_data(symbol: str, report_type: str = "ReportsFinSummary") -> dict[str, Any]:
+async def get_fundamental_data(
+    symbol: str,
+    report_type: str = "ReportsFinSummary",
+) -> dict[str, Any]:
     """Retrieve fundamental data for a contract.
 
     report_type options: ReportsFinSummary, ReportsOwnership,
@@ -194,13 +212,19 @@ async def get_news(symbol: str, max_articles: int = 10) -> list[dict[str, Any]]:
         providers = await ibc.reqNewsProvidersAsync()
         provider_codes = "+".join(p.code for p in providers) if providers else "BRFG+DJNL"
         news = await ibc.reqHistoricalNewsAsync(
-            contract.conId, provider_codes,
-            startDateTime="", endDateTime="",
+            contract.conId,
+            provider_codes,
+            startDateTime="",
+            endDateTime="",
             totalResults=max_articles,
         )
         return [
-            {"time": n.time, "providerCode": n.providerCode,
-             "articleId": n.articleId, "headline": n.headline}
+            {
+                "time":         n.time,
+                "providerCode": n.providerCode,
+                "articleId":    n.articleId,
+                "headline":     n.headline,
+            }
             for n in news
         ]
 
@@ -219,14 +243,19 @@ async def get_historical_news(
         providers = await ibc.reqNewsProvidersAsync()
         provider_codes = "+".join(p.code for p in providers) if providers else "BRFG+DJNL"
         news = await ibc.reqHistoricalNewsAsync(
-            contract.conId, provider_codes,
+            contract.conId,
+            provider_codes,
             startDateTime=start_date,
             endDateTime=end_date,
             totalResults=max_articles,
         )
         return [
-            {"time": n.time, "providerCode": n.providerCode,
-             "articleId": n.articleId, "headline": n.headline}
+            {
+                "time":         n.time,
+                "providerCode": n.providerCode,
+                "articleId":    n.articleId,
+                "headline":     n.headline,
+            }
             for n in news
         ]
 
@@ -236,7 +265,10 @@ async def get_article(provider_code: str, article_id: str) -> dict[str, Any]:
     """Retrieve the full text of a news article by provider code and article ID."""
     async with _ib_connect() as ibc:
         article = await ibc.reqNewsArticleAsync(provider_code, article_id)
-        return {"articleType": article.articleType, "articleText": article.articleText}
+        return {
+            "articleType": article.articleType,
+            "articleText": article.articleText,
+        }
 
 
 @mcp.tool()
@@ -244,7 +276,10 @@ async def get_account_summary() -> dict[str, Any]:
     """Retrieve account summary: balances, equity, margin, cash."""
     async with _ib_connect() as ibc:
         summary = await ibc.accountSummaryAsync()
-        return {item.tag: {"value": item.value, "currency": item.currency} for item in summary}
+        return {
+            item.tag: {"value": item.value, "currency": item.currency}
+            for item in summary
+        }
 
 
 @mcp.tool()
@@ -272,10 +307,11 @@ async def get_positions() -> list[dict[str, Any]]:
 # ===========================================================================
 
 def _require_trading() -> None:
+    """Raise a clear error if trading is disabled."""
     if not TRADING_ENABLED:
         raise RuntimeError(
-            "Trading is disabled. Set TRADING_ENABLED=true in your environment "
-            "to enable order placement. Also ensure READ_ONLY_API=no."
+            "Trading is disabled. "
+            "Set TRADING_ENABLED=true and READ_ONLY_API=no to enable order placement."
         )
 
 
@@ -305,6 +341,9 @@ async def place_order(
         currency:    Currency (default: USD)
         tif:         Time-in-force: DAY | GTC | IOC  (default: DAY)
         account:     Account ID (optional, uses default if empty)
+
+    Returns:
+        orderId, status, symbol, action, quantity, orderType, limitPrice, stopPrice
     """
     _require_trading()
 
@@ -336,7 +375,7 @@ async def place_order(
             order.account = account
 
         trade = ibc.placeOrder(contract, order)
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # allow IBKR to acknowledge
 
         return {
             "orderId":    trade.order.orderId,
@@ -352,7 +391,14 @@ async def place_order(
 
 @mcp.tool()
 async def cancel_order(order_id: int) -> dict[str, Any]:
-    """Cancel an open order by its IBKR order ID."""
+    """Cancel an open order by its IBKR order ID.
+
+    Args:
+        order_id: The IBKR order ID returned by place_order or get_open_orders
+
+    Returns:
+        orderId, status (Cancelled or PendingCancel)
+    """
     _require_trading()
 
     async with _ib_connect() as ibc:
@@ -365,30 +411,37 @@ async def cancel_order(order_id: int) -> dict[str, Any]:
         await asyncio.sleep(1)
 
         still_open = any(t.order.orderId == order_id for t in ibc.openTrades())
-        return {"orderId": order_id, "status": "PendingCancel" if still_open else "Cancelled"}
+        return {
+            "orderId": order_id,
+            "status":  "PendingCancel" if still_open else "Cancelled",
+        }
 
 
 @mcp.tool()
 async def get_open_orders() -> list[dict[str, Any]]:
-    """Retrieve all currently open orders."""
+    """Retrieve all currently open orders.
+
+    Returns orderId, symbol, action, quantity, orderType,
+    limitPrice, stopPrice, tif, status, filled, remaining.
+    """
     _require_trading()
 
     async with _ib_connect() as ibc:
         await ibc.reqOpenOrdersAsync()
         return [
             {
-                "orderId":   t.order.orderId,
-                "symbol":    t.contract.symbol,
-                "secType":   t.contract.secType,
-                "action":    t.order.action,
-                "quantity":  t.order.totalQuantity,
-                "orderType": t.order.orderType,
+                "orderId":    t.order.orderId,
+                "symbol":     t.contract.symbol,
+                "secType":    t.contract.secType,
+                "action":     t.order.action,
+                "quantity":   t.order.totalQuantity,
+                "orderType":  t.order.orderType,
                 "limitPrice": getattr(t.order, "lmtPrice", None),
                 "stopPrice":  getattr(t.order, "auxPrice", None),
-                "tif":       t.order.tif,
-                "status":    t.orderStatus.status,
-                "filled":    t.orderStatus.filled,
-                "remaining": t.orderStatus.remaining,
+                "tif":        t.order.tif,
+                "status":     t.orderStatus.status,
+                "filled":     t.orderStatus.filled,
+                "remaining":  t.orderStatus.remaining,
             }
             for t in ibc.openTrades()
         ]
@@ -402,7 +455,17 @@ async def modify_order(
     stop_price: float | None = None,
     tif: str | None = None,
 ) -> dict[str, Any]:
-    """Modify quantity, price or time-in-force of an existing open order."""
+    """Modify quantity, price, or time-in-force of an existing open order.
+
+    Only the fields you pass will be changed; the rest remain unchanged.
+
+    Args:
+        order_id:    IBKR order ID to modify
+        quantity:    New total quantity (optional)
+        limit_price: New limit price (optional)
+        stop_price:  New stop/aux price (optional)
+        tif:         New time-in-force: DAY | GTC | IOC (optional)
+    """
     _require_trading()
 
     async with _ib_connect() as ibc:
@@ -432,7 +495,10 @@ async def modify_order(
 
 @mcp.tool()
 async def get_trades_history() -> list[dict[str, Any]]:
-    """Retrieve executed fills from the current session."""
+    """Retrieve executed fills from the current session.
+
+    Returns execId, time, symbol, action, quantity, price, commission, currency.
+    """
     _require_trading()
 
     async with _ib_connect() as ibc:
@@ -458,24 +524,37 @@ async def get_trades_history() -> list[dict[str, Any]]:
 def main() -> None:
     import argparse
 
+    # NOTE: _cfg is a module-level dict – no global declaration needed.
+    # Defaults are read from env at import time; CLI args override below.
     parser = argparse.ArgumentParser(description="IB MCP Server (extended)")
-    parser.add_argument("--host",      default=IB_HOST,      help="IB Gateway host")
-    parser.add_argument("--port",      default=IB_PORT,      type=int)
-    parser.add_argument("--client-id", default=IB_CLIENT_ID, type=int)
+    parser.add_argument("--host",      default=_cfg["host"],
+                        help="IB Gateway host")
+    parser.add_argument("--port",      default=_cfg["port"],      type=int,
+                        help="IB Gateway port")
+    parser.add_argument("--client-id", default=_cfg["client_id"], type=int,
+                        help="IB client ID")
     parser.add_argument("--transport", default=os.getenv("IB_MCP_TRANSPORT", "stdio"),
-                        choices=["stdio", "http"])
-    parser.add_argument("--http-host", default=os.getenv("IB_MCP_HTTP_HOST", "127.0.0.1"))
-    parser.add_argument("--http-port", default=int(os.getenv("IB_MCP_HTTP_PORT", "8000")), type=int)
+                        choices=["stdio", "http"],
+                        help="Transport: stdio or http")
+    parser.add_argument("--http-host", default=os.getenv("IB_MCP_HTTP_HOST", "127.0.0.1"),
+                        help="HTTP bind host")
+    parser.add_argument("--http-port", default=int(os.getenv("IB_MCP_HTTP_PORT", "8000")),
+                        type=int, help="HTTP bind port")
     args = parser.parse_args()
 
-    global IB_HOST, IB_PORT, IB_CLIENT_ID
-    IB_HOST      = args.host
-    IB_PORT      = args.port
-    IB_CLIENT_ID = args.client_id
+    # Apply CLI overrides into the shared config dict
+    _cfg["host"]      = args.host
+    _cfg["port"]      = args.port
+    _cfg["client_id"] = args.client_id
 
-    logger.info("IB MCP Server (extended) – Trading: %s",
-                "ENABLED" if TRADING_ENABLED else "DISABLED (read-only)")
-    logger.info("Connecting to IB Gateway at %s:%d (clientId=%d)", IB_HOST, IB_PORT, IB_CLIENT_ID)
+    logger.info(
+        "IB MCP Server (extended) starting – Trading: %s",
+        "ENABLED" if TRADING_ENABLED else "DISABLED (read-only mode)",
+    )
+    logger.info(
+        "Connecting to IB Gateway at %s:%d (clientId=%d)",
+        _cfg["host"], _cfg["port"], _cfg["client_id"],
+    )
 
     if args.transport == "http":
         mcp.run(transport="streamable-http", host=args.http_host, port=args.http_port)
