@@ -1,18 +1,18 @@
 name: ibkr-mcp-stack
 
 # ─────────────────────────────────────────────────────────────────
-#  Architektur
+#  Architecture
 #
 #  Internet (HTTPS)
 #    │
 #    ▼
 #  Caddy (TLS, Routing, Auth)
-#    ├── /mcp*   → Anthropic-IPs (Claude.ai) ODER Bearer-Token
+#    ├── /mcp*   → Anthropic IPs (Claude.ai) OR Bearer Token
 #    │              → ibkr-mcp-server:8000
-#    └── /mcpo*  → Bearer-Token → mcpo:8001 → ibkr-mcp-server:8000
+#    └── /mcpo*  → Bearer Token → mcpo:8001 → ibkr-mcp-server:8000
 #                  (Open-WebUI via OpenAPI)
 #
-#  Umschalten Paper ↔ Live: Nur .env Datei ändern!
+#  Switch Paper ↔ Live: change only the .env file!
 #    TRADING_MODE=paper  + IB_GATEWAY_PORT=4004
 #    TRADING_MODE=live   + IB_GATEWAY_PORT=4003
 # ─────────────────────────────────────────────────────────────────
@@ -35,14 +35,14 @@ services:
       TIME_ZONE:                   ${TIME_ZONE}
       VNC_SERVER_PASSWORD:         ${VNC_SERVER_PASSWORD}
     ports:
-      # VNC nur lokal – ausschließlich für Debugging
+      # VNC local only – for debugging purposes
       - "127.0.0.1:5900:5900"
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts
     networks:
       - ibkr-internal
     healthcheck:
-      # 0x0FA3 = 4003 (Live-Port), 0x0FA4 = 4004 (Paper-Port)
+      # 0x0FA3 = 4003 (live port), 0x0FA4 = 4004 (paper port)
       test: ["CMD-SHELL", "grep -q '0FA4\\|0FA3' /proc/net/tcp"]
       interval: 30s
       timeout: 10s
@@ -51,10 +51,10 @@ services:
 
   # ── 2. IBKR MCP Server ────────────────────────────────────────
   ibkr-mcp-server:
-    build: ./ibkr-trading          # eigenes Image (hellek1 + Trading-Erweiterung)
+    build: ./ibkr-trading          # custom image (hellek1 + trading extension)
     restart: always
-    # CLI-Argumente überschreiben interne Image-Defaults.
-    # IB_GATEWAY_PORT kommt aus .env:
+    # CLI arguments override internal image defaults.
+    # IB_GATEWAY_PORT comes from .env:
     #   Paper → 4004  |  Live → 4003
     command:
       - "--host"
@@ -77,14 +77,14 @@ services:
       ib-gateway:
         condition: service_healthy
     healthcheck:
-      # 0x1F40 = Port 8000
+      # 0x1F40 = port 8000
       test: ["CMD-SHELL", "grep -q '1F40' /proc/net/tcp6 || grep -q '1F40' /proc/net/tcp"]
       interval: 20s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-  # ── 3. MCPO (MCP → OpenAPI Proxy für Open-WebUI) ─────────────
+  # ── 3. MCPO (MCP → OpenAPI proxy for Open-WebUI) ─────────────
   mcpo:
     image: ghcr.io/open-webui/mcpo:main
     restart: always
@@ -103,20 +103,20 @@ services:
       ibkr-mcp-server:
         condition: service_healthy
     healthcheck:
-      # 0x1F41 = Port 8001
+      # 0x1F41 = port 8001
       test: ["CMD-SHELL", "grep -q '1F41' /proc/net/tcp6 || grep -q '1F41' /proc/net/tcp"]
       interval: 20s
       timeout: 5s
       retries: 5
       start_period: 45s
 
-  # ── 4. Caddy (TLS, Routing, Authentifizierung) ────────────────
+  # ── 4. Caddy (TLS, routing, authentication) ───────────────────
   caddy:
     image: caddy:2-alpine
     restart: always
-    # WICHTIG: entrypoint ersetzt __DOMAIN__ im Caddyfile-Template
-    # via sed bevor Caddy startet. Caddy löst {env.DOMAIN} im
-    # Site-Block-Label nicht zuverlässig auf – sed ist 100% sicher.
+    # IMPORTANT: entrypoint replaces __DOMAIN__ in the Caddyfile template
+    # via sed before Caddy starts. Caddy does not reliably resolve {env.DOMAIN}
+    # in site block labels – sed is 100% reliable.
     entrypoint:
       - /bin/sh
       - -c
@@ -132,7 +132,7 @@ services:
       DOMAIN:           ${DOMAIN}
       MCP_SECRET_TOKEN: ${MCP_SECRET_TOKEN}
     volumes:
-      # Caddyfile als Template mounten (entrypoint generiert finale Version)
+      # Mount Caddyfile as template (entrypoint generates final version)
       - ./Caddyfile:/etc/caddy/Caddyfile.tmpl:ro
       - caddy-data:/data
       - caddy-config:/config
@@ -150,7 +150,7 @@ volumes:
   caddy-data:
   caddy-config:
 
-# ── Netzwerke ─────────────────────────────────────────────────────
+# ── Networks ──────────────────────────────────────────────────────
 networks:
   ibkr-internal:
     driver: bridge
