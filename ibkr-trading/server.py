@@ -539,3 +539,129 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+@mcp.tool()
+async def place_spread_order(
+    legs: list[dict[str, Any]],
+    action: str,
+    quantity: float,
+    limit_price: float | None = None,
+    tif: str = "DAY",
+    account: str = "",
+) -> dict[str, Any]:
+    """Place a multi-leg options spread order (e.g. Bull Put Spread, Iron Condor).
+
+    Each leg is looked up by symbol + expiry + strike + right, then assembled
+    into an IBKR BAG (combo) contract.  Claude will present the full order
+    details and ask for confirmation before this tool is called.
+
+    Args:
+        legs: List of leg dicts, each with:
+              - symbol   : underlying ticker (e.g. "MSFT")
+              - expiry   : YYYYMMDD  (e.g. "20260417")
+              - strike   : float     (e.g. 360.0)
+              - right    : "C" or "P"
+              - ratio    : int       (usually 1)
+              - action   : "BUY" or "SELL" (per-leg direction)
+              - exchange : optional, default "SMART"
+        action:      Overall combo action: BUY (net debit) or SELL (net credit)
+        quantity:    Number of spread contracts
+        limit_price: Net debit (BUY) or net credit (SELL) – None = market
+        tif:         DAY | GTC  (default: DAY)
+        account:     Account ID (optional)
+
+    Example – Bull Put Spread (sell 360P, buy 340P):
+        legs=[
+          {"symbol":"MSFT","expiry":"20260417","strike":360,"right":"P",
+           "ratio":1,"action":"SELL"},
+          {"symbol":"MSFT","expiry":"20260417","strike":340,"right":"P",
+           "ratio":1,"action":"BUY"},
+        ]
+        action="SELL", quantity=1, limit_price=2.50
+    """
+    _require_trading()
+
+    if not legs or len(legs) < 2:
+        raise ValueError("A spread requires at least 2 legs.")
+
+    action = action.upper()
+    if action not in ("BUY", "SELL"):
+        raise ValueError(f"action must be BUY or SELL, got: {action!r}")
+
+    async with _ib_connect() as ibc:
+        combo_legs: list[ib.ComboLeg] = []
+        leg_details: list[dict[str, Any]] = []
+
+        for leg in legs:
+            sym      = leg["symbol"]
+            expiry   = str(leg["expiry"])
+            strike   = float(leg["strike"])
+            right    = leg["right"].upper()
+            ratio    = int(leg.get("ratio", 1))
+            leg_act  = leg["action"].upper()
+            exchange = leg.get("exchange", "SMART")
+
+            if right not in ("C", "P"):
+                raise ValueError(f"right must be C or P, got: {right!r}")
+            if leg_act not in ("BUY", "SELL"):
+                raise ValueError(f"leg action must be BUY or SELL, got: {leg_act!r}")
+
+            opt_contract = ib.Option(sym, expiry, strike, right, exchange)
+            details = await ibc.reqContractDetailsAsync(opt_contract)
+            if not details:
+                raise RuntimeError(
+                    f"No contract found for {sym} {expiry} {strike}{right}"
+                )
+            conid = details[0].contract.conId
+
+            combo_legs.append(ib.ComboLeg(
+                conId=conid,
+                ratio=ratio,
+                action=leg_act,
+                exchange=exchange,
+            ))
+            leg_details.append({
+                "symbol":  sym,
+                "expiry":  expiry,
+                "strike":  strike,
+                "right":   right,
+                "action":  leg_act,
+                "ratio":   ratio,
+                "conid":   conid,
+            })
+
+        # Build BAG (combo) contract
+        bag = ib.Contract(
+            symbol=legs[0]["symbol"],
+            secType="BAG",
+            currency="USD",
+            exchange=legs[0].get("exchange", "SMART"),
+            comboLegs=combo_legs,
+        )
+
+        order_type = "LMT" if limit_price is not None else "MKT"
+        order = ib.Order(
+            action=action,
+            totalQuantity=quantity,
+            orderType=order_type,
+            tif=tif,
+        )
+        if limit_price is not None:
+            order.lmtPrice = limit_price
+        if account:
+            order.account = account
+
+        trade = ibc.placeOrder(bag, order)
+        await asyncio.sleep(1)
+
+        return {
+            "orderId":    trade.order.orderId,
+            "status":     trade.orderStatus.status,
+            "action":     action,
+            "quantity":   quantity,
+            "orderType":  order_type,
+            "limitPrice": limit_price,
+            "tif":        tif,
+            "legs":       leg_details,
+        }
