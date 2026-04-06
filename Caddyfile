@@ -1,0 +1,122 @@
+# ═══════════════════════════════════════════════════════════════
+#  Caddyfile – IBKR MCP Stack
+#
+#  Sicherheitskonzept:
+#
+#  /mcp*   → Anthropic-IPs (Claude.ai) ODER Bearer-Token
+#             → Zugang für: Claude.ai, Perplexity, OpenAI API
+#
+#  /mcpo*  → Nur Bearer-Token
+#             → Zugang für: Open-WebUI (via OpenAPI)
+#
+#  Alles andere → 404
+# ═══════════════════════════════════════════════════════════════
+
+{env.DOMAIN} {
+
+    # ── Logging ───────────────────────────────────────────────
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size     50mb
+            roll_keep     5
+            roll_keep_for 720h
+        }
+        format json
+        level  INFO
+    }
+
+    # ── Sicherheits-Header ────────────────────────────────────
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        -Server
+    }
+
+    # ═══════════════════════════════════════════════════════════
+    #  ENDPUNKT 1: /mcp  (direkter MCP Streamable HTTP)
+    #
+    #  Erlaubt:
+    #   a) Anthropic-Egress-IPs  → Claude.ai (kein Token nötig)
+    #   b) Gültiger Bearer-Token → Perplexity, OpenAI API
+    #
+    #  Anthropic dokumentierte Egress-IP: 160.79.104.0/21
+    #  Quelle: https://docs.claude.com/en/api/ip-addresses
+    # ═══════════════════════════════════════════════════════════
+    route /mcp* {
+
+        # Matcher: Anfragen von Anthropic-Infrastruktur
+        @anthropic_ip remote_ip 160.79.104.0/21
+
+        # Matcher: Anfragen mit gültigem Bearer-Token
+        @valid_bearer header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
+
+        # Matcher: Alles was NICHT Anthropic-IP und NICHT gültiger Token ist
+        @unauthorized {
+            not remote_ip 160.79.104.0/21
+            not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
+        }
+
+        # ── Claude.ai: via Anthropic-IP ──────────────────────
+        handle @anthropic_ip {
+            reverse_proxy ibkr-mcp-server:8000 {
+                header_up X-Forwarded-For {remote_host}
+                header_up X-Auth-Source   "anthropic-ip"
+            }
+        }
+
+        # ── Perplexity / OpenAI API: via Bearer-Token ────────
+        handle @valid_bearer {
+            reverse_proxy ibkr-mcp-server:8000 {
+                header_up X-Forwarded-For {remote_host}
+                header_up X-Auth-Source   "bearer-token"
+            }
+        }
+
+        # ── Alles andere: Zugang verweigert ──────────────────
+        handle @unauthorized {
+            respond "Unauthorized" 401
+        }
+    }
+
+    # ═══════════════════════════════════════════════════════════
+    #  ENDPUNKT 2: /mcpo  (OpenAPI via MCPO für Open-WebUI)
+    #
+    #  Nur mit gültigem Bearer-Token erreichbar.
+    #  MCPO wandelt MCP → OpenAPI um.
+    #  Open-WebUI trägt diesen Endpunkt als "OpenAPI Tool Server" ein.
+    #
+    #  Beispiel-URL in Open-WebUI:
+    #    https://{DOMAIN}/mcpo/ibkr/openapi.json
+    # ═══════════════════════════════════════════════════════════
+    route /mcpo* {
+
+        @valid_bearer header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
+
+        @unauthorized {
+            not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
+        }
+
+        # ── Authorisiert: Strip /mcpo Prefix, weiterleiten ───
+        handle @valid_bearer {
+            uri strip_prefix /mcpo
+            reverse_proxy mcpo:8001 {
+                header_up X-Forwarded-For {remote_host}
+                header_up X-Auth-Source   "mcpo-bearer"
+            }
+        }
+
+        # ── Nicht authorisiert ───────────────────────────────
+        handle @unauthorized {
+            respond "Unauthorized" 401
+        }
+    }
+
+    # ── Alle anderen Pfade: 404 ───────────────────────────────
+    handle {
+        respond "Not Found" 404
+    }
+}
+
+# ── HTTP → HTTPS Redirect (automatisch via Caddy) ─────────────
+# Caddy übernimmt TLS automatisch via Let's Encrypt

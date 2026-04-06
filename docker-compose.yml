@@ -1,0 +1,149 @@
+name: ibkr-mcp-stack
+
+# ─────────────────────────────────────────────────────────────────
+#  Architektur
+#
+#  Internet (HTTPS)
+#    │
+#    ▼
+#  Caddy (TLS, Routing, Auth)
+#    ├── /mcp*   → Anthropic-IPs (Claude.ai) ODER Bearer-Token
+#    │              → ibkr-mcp-server:8000
+#    │              (Claude.ai via IP-Whitelist, Perplexity/OpenAI via Bearer)
+#    └── /mcpo*  → Bearer-Token → mcpo:8001 → ibkr-mcp-server:8000
+#                  (Open-WebUI via OpenAPI)
+#
+#  Alle Services kommunizieren intern über ibkr-internal Netzwerk.
+#  Der ibkr-mcp-server ist NICHT direkt aus dem Internet erreichbar.
+#
+#  Umschalten Paper ↔ Live: Nur .env Datei ändern!
+#    TRADING_MODE=paper  + IB_GATEWAY_PORT=4004
+#    TRADING_MODE=live   + IB_GATEWAY_PORT=4003
+# ─────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── 1. IB Gateway (TWS headless) ─────────────────────────────
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: always
+    environment:
+      TWS_USERID:                  ${TWS_USERID}
+      TWS_PASSWORD:                ${TWS_PASSWORD}
+      TRADING_MODE:                ${TRADING_MODE}              # .env: paper | live
+      READ_ONLY_API:               ${READ_ONLY_API}             # .env: yes   (KRITISCH!)
+      TWS_ACCEPT_INCOMING:         yes
+      TWOFA_TIMEOUT_ACTION:        ${TWOFA_TIMEOUT_ACTION}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT}
+      AUTO_RESTART_TIME:           ${AUTO_RESTART_TIME}
+      TIME_ZONE:                   ${TIME_ZONE}
+      VNC_SERVER_PASSWORD:         ${VNC_SERVER_PASSWORD}
+    ports:
+      # VNC nur lokal – ausschließlich für Debugging
+      - "127.0.0.1:5900:5900"
+    volumes:
+      - ib-gateway-settings:/home/ibgateway/Jts
+    networks:
+      - ibkr-internal
+    healthcheck:
+      # 0x0FA3 = 4003 (Live-Port), 0x0FA4 = 4004 (Paper-Port)
+      test: ["CMD-SHELL", "grep -q '0FA4\\|0FA3' /proc/net/tcp"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # ── 2. IBKR MCP Server ────────────────────────────────────────
+  ibkr-mcp-server:
+    image: ghcr.io/hellek1/ib-mcp:latest
+    restart: always
+    # CLI-Argumente direkt übergeben – überschreibt interne Defaults des Images.
+    # IB_GATEWAY_PORT kommt aus .env:
+    #   Paper → 4004
+    #   Live  → 4003
+    command:
+      - "--host"
+      - "ib-gateway"
+      - "--port"
+      - "${IB_GATEWAY_PORT}"
+      - "--client-id"
+      - "1"
+      - "--transport"
+      - "http"
+      - "--http-host"
+      - "0.0.0.0"
+      - "--http-port"
+      - "8000"
+    # Kein externer Port-Expose – nur intern erreichbar
+    networks:
+      - ibkr-internal
+    depends_on:
+      ib-gateway:
+        condition: service_healthy
+    healthcheck:
+      # 0x1F40 = Port 8000
+      test: ["CMD-SHELL", "grep -q '1F40' /proc/net/tcp6 || grep -q '1F40' /proc/net/tcp"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── 3. MCPO (MCP → OpenAPI Proxy für Open-WebUI) ─────────────
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:main
+    restart: always
+    command:
+      - "--port"
+      - "8001"
+      - "--api-key"
+      - "${MCP_SECRET_TOKEN}"
+      - "--config"
+      - "/app/config.json"
+    volumes:
+      - ./mcpo/config.json:/app/config.json:ro
+    networks:
+      - ibkr-internal
+    depends_on:
+      ibkr-mcp-server:
+        condition: service_healthy
+    healthcheck:
+      # 0x1F41 = Port 8001
+      test: ["CMD-SHELL", "grep -q '1F41' /proc/net/tcp6 || grep -q '1F41' /proc/net/tcp"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  # ── 4. Caddy (TLS, Routing, Authentifizierung) ────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"           # HTTP/3 (QUIC)
+    environment:
+      MCP_SECRET_TOKEN: ${MCP_SECRET_TOKEN}
+      DOMAIN:           ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - ibkr-internal
+    depends_on:
+      mcpo:
+        condition: service_healthy
+      ibkr-mcp-server:
+        condition: service_healthy
+
+# ── Volumes ───────────────────────────────────────────────────────
+volumes:
+  ib-gateway-settings:
+  caddy-data:
+  caddy-config:
+
+# ── Netzwerke ─────────────────────────────────────────────────────
+networks:
+  ibkr-internal:
+    driver: bridge

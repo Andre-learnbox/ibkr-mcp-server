@@ -1,0 +1,10 @@
+# Sensible Daten – niemals committen!
+.env
+caddy-data/
+caddy-config/
+
+# Logs
+*.log
+
+# Temporäre Dateien
+*.tmp
