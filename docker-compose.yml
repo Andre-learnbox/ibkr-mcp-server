@@ -51,7 +51,7 @@ services:
 
   # ── 2. IBKR MCP Server ────────────────────────────────────────
   ibkr-mcp-server:
-    image: ghcr.io/hellek1/ib-mcp:latest
+    build: ./ibkr-trading          # eigenes Image (hellek1 + Trading-Erweiterung)
     restart: always
     # CLI-Argumente überschreiben interne Image-Defaults.
     # IB_GATEWAY_PORT kommt aus .env:
@@ -69,6 +69,8 @@ services:
       - "0.0.0.0"
       - "--http-port"
       - "8000"
+    environment:
+      TRADING_ENABLED: ${TRADING_ENABLED:-false}
     networks:
       - ibkr-internal
     depends_on:
