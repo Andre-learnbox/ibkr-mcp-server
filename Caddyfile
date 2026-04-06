@@ -1,18 +1,24 @@
 # ═══════════════════════════════════════════════════════════════
 #  Caddyfile – IBKR MCP Stack
 #
+#  WICHTIG: Diese Datei ist ein Template!
+#  Der Platzhalter __DOMAIN__ wird beim Container-Start durch
+#  die DOMAIN-Umgebungsvariable ersetzt (via sed im entrypoint).
+#
+#  {env.MCP_SECRET_TOKEN} funktioniert direkt in Caddy-Direktiven
+#  (nicht im Site-Block-Label), daher dieser gemischte Ansatz.
+#
 #  Sicherheitskonzept:
-#
 #  /mcp*   → Anthropic-IPs (Claude.ai) ODER Bearer-Token
-#             → Zugang für: Claude.ai, Perplexity, OpenAI API
-#
-#  /mcpo*  → Nur Bearer-Token
-#             → Zugang für: Open-WebUI (via OpenAPI)
-#
+#             → Claude.ai, Perplexity, OpenAI API
+#  /mcpo*  → Nur Bearer-Token → Open-WebUI via OpenAPI
 #  Alles andere → 404
 # ═══════════════════════════════════════════════════════════════
 
-{env.DOMAIN} {
+__DOMAIN__ {
+
+    # ── TLS (automatisch via Let's Encrypt) ───────────────────
+    # Caddy holt das Zertifikat automatisch wenn DOMAIN gesetzt ist
 
     # ── Logging ───────────────────────────────────────────────
     log {
@@ -38,42 +44,31 @@
     #
     #  Erlaubt:
     #   a) Anthropic-Egress-IPs  → Claude.ai (kein Token nötig)
+    #      Quelle: https://docs.claude.com/en/api/ip-addresses
     #   b) Gültiger Bearer-Token → Perplexity, OpenAI API
-    #
-    #  Anthropic dokumentierte Egress-IP: 160.79.104.0/21
-    #  Quelle: https://docs.claude.com/en/api/ip-addresses
     # ═══════════════════════════════════════════════════════════
     route /mcp* {
 
-        # Matcher: Anfragen von Anthropic-Infrastruktur
         @anthropic_ip remote_ip 160.79.104.0/21
 
-        # Matcher: Anfragen mit gültigem Bearer-Token
         @valid_bearer header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
 
-        # Matcher: Alles was NICHT Anthropic-IP und NICHT gültiger Token ist
         @unauthorized {
             not remote_ip 160.79.104.0/21
             not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
         }
 
-        # ── Claude.ai: via Anthropic-IP ──────────────────────
+        # Claude.ai: via Anthropic-IP durchlassen
         handle @anthropic_ip {
-            reverse_proxy ibkr-mcp-server:8000 {
-                header_up X-Forwarded-For {remote_host}
-                header_up X-Auth-Source   "anthropic-ip"
-            }
+            reverse_proxy ibkr-mcp-server:8000
         }
 
-        # ── Perplexity / OpenAI API: via Bearer-Token ────────
+        # Perplexity / OpenAI API: via Bearer-Token
         handle @valid_bearer {
-            reverse_proxy ibkr-mcp-server:8000 {
-                header_up X-Forwarded-For {remote_host}
-                header_up X-Auth-Source   "bearer-token"
-            }
+            reverse_proxy ibkr-mcp-server:8000
         }
 
-        # ── Alles andere: Zugang verweigert ──────────────────
+        # Alles andere: 401
         handle @unauthorized {
             respond "Unauthorized" 401
         }
@@ -82,12 +77,10 @@
     # ═══════════════════════════════════════════════════════════
     #  ENDPUNKT 2: /mcpo  (OpenAPI via MCPO für Open-WebUI)
     #
-    #  Nur mit gültigem Bearer-Token erreichbar.
-    #  MCPO wandelt MCP → OpenAPI um.
-    #  Open-WebUI trägt diesen Endpunkt als "OpenAPI Tool Server" ein.
-    #
-    #  Beispiel-URL in Open-WebUI:
-    #    https://{DOMAIN}/mcpo/ibkr/openapi.json
+    #  Nur mit Bearer-Token erreichbar.
+    #  In Open-WebUI als "OpenAPI Tool Server" eintragen:
+    #    URL:  https://__DOMAIN__/mcpo/ibkr
+    #    Auth: Bearer → MCP_SECRET_TOKEN
     # ═══════════════════════════════════════════════════════════
     route /mcpo* {
 
@@ -97,16 +90,11 @@
             not header Authorization "Bearer {env.MCP_SECRET_TOKEN}"
         }
 
-        # ── Authorisiert: Strip /mcpo Prefix, weiterleiten ───
         handle @valid_bearer {
             uri strip_prefix /mcpo
-            reverse_proxy mcpo:8001 {
-                header_up X-Forwarded-For {remote_host}
-                header_up X-Auth-Source   "mcpo-bearer"
-            }
+            reverse_proxy mcpo:8001
         }
 
-        # ── Nicht authorisiert ───────────────────────────────
         handle @unauthorized {
             respond "Unauthorized" 401
         }
@@ -117,6 +105,3 @@
         respond "Not Found" 404
     }
 }
-
-# ── HTTP → HTTPS Redirect (automatisch via Caddy) ─────────────
-# Caddy übernimmt TLS automatisch via Let's Encrypt

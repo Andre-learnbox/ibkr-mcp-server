@@ -1,4 +1,6 @@
-# IBKR MCP Stack – Setup & Konfiguration
+# IBKR MCP Stack
+
+Selbst-gehosteter MCP-Server für Interactive Brokers – absicherbar für Claude.ai, Perplexity, Open-WebUI und die OpenAI API.
 
 ## Architektur
 
@@ -17,113 +19,99 @@ Internet (HTTPS)
 ## Schnellstart
 
 ```bash
-# 1. Repository klonen / Dateien kopieren
+# 1. .env anlegen
 cp .env.example .env
 
-# 2. Token generieren
+# 2. Token generieren und in .env eintragen
 openssl rand -hex 32
-# → Ausgabe in .env bei MCP_SECRET_TOKEN eintragen
 
-# 3. Domain eintragen
-# → DOMAIN=mcp.deine-domain.de in .env
+# 3. Alle Pflichtfelder in .env ausfüllen (Domain, IBKR-Zugangsdaten)
 
-# 4. IBKR-Zugangsdaten eintragen
-# → TWS_USERID und TWS_PASSWORD in .env
-
-# 5. Starten
+# 4. Starten
 docker compose up -d
 
-# 6. Logs prüfen
-docker compose logs -f
+# 5. Logs prüfen
+docker compose logs -f caddy
 ```
 
----
+## Paper ↔ Live umschalten
+
+Nur diese zwei Zeilen in `.env` ändern, dann neu starten:
+
+```env
+# Paper-Konto
+TRADING_MODE=paper
+IB_GATEWAY_PORT=4004
+
+# Live-Konto
+TRADING_MODE=live
+IB_GATEWAY_PORT=4003
+```
+
+```bash
+docker compose up -d --force-recreate ib-gateway ibkr-mcp-server
+```
 
 ## Client-Konfiguration
 
 ### Claude.ai
-
-Claude.ai verbindet sich automatisch über Anthropic-IPs – **kein Token nötig**.
-
-**Einrichtung:**
-1. claude.ai → Einstellungen → Connectors → + Custom Connector
-2. URL: `https://mcp.deine-domain.de/mcp`
-3. Transport: Streamable HTTP
-4. Auth: **None** (Anthropic-IPs sind whitelisted)
-
----
+Verbindet sich über Anthropic-IPs – kein Token nötig.
+- URL: `https://deine-domain.de/mcp`
+- Transport: Streamable HTTP
+- Auth: **None**
 
 ### Perplexity (Pro/Max/Enterprise)
-
-**Einrichtung:**
-1. perplexity.ai → Settings → Connectors → + Custom Connector → Remote
-2. URL: `https://mcp.deine-domain.de/mcp`
-3. Transport: Streamable HTTP
-4. Auth: **API Key** → deinen `MCP_SECRET_TOKEN` eintragen
-
----
+- Settings → Connectors → + Custom Connector → Remote
+- URL: `https://deine-domain.de/mcp`
+- Transport: Streamable HTTP
+- Auth: **API Key** → `MCP_SECRET_TOKEN` eintragen
 
 ### Open-WebUI
-
-Open-WebUI nutzt den MCPO-Endpunkt (OpenAPI-Format).
-
-**Einrichtung:**
-1. Admin Settings → External Tools → + Add Server
-2. Type: **OpenAPI** (nicht MCP!)
-3. URL: `https://mcp.deine-domain.de/mcpo/ibkr`
-4. Auth: Bearer → deinen `MCP_SECRET_TOKEN` eintragen
-
----
+- Admin Settings → External Tools → + Add Server
+- Type: **OpenAPI** (nicht MCP!)
+- URL: `https://deine-domain.de/mcpo/ibkr`
+- Auth: **Bearer** → `MCP_SECRET_TOKEN` eintragen
 
 ### OpenAI Responses API
-
-Token wird pro API-Request als Header übergeben.
-
 ```python
 from openai import OpenAI
-
 client = OpenAI()
 resp = client.responses.create(
     model="gpt-4.1",
     tools=[{
         "type": "mcp",
         "server_label": "ibkr",
-        "server_url": "https://mcp.deine-domain.de/mcp",
+        "server_url": "https://deine-domain.de/mcp",
         "require_approval": "never",
-        "headers": {
-            "Authorization": "Bearer DEIN_MCP_SECRET_TOKEN"
-        }
+        "headers": {"Authorization": "Bearer DEIN_MCP_SECRET_TOKEN"}
     }],
     input="Zeige mein Portfolio"
 )
 ```
 
----
-
 ## Sicherheitshinweise
 
-- `READ_ONLY_API=yes` **niemals** deaktivieren solange MCP aktiv!
-- `MCP_SECRET_TOKEN` niemals in Git committen
-- VNC (`VNC_SERVER_PASSWORD`) nur für Debugging aktivieren
+- `READ_ONLY_API=yes` **niemals** deaktivieren solange MCP aktiv ist!
+- `MCP_SECRET_TOKEN` niemals in Git committen (`.gitignore` schützt `.env`)
 - Anthropic-IP-Whitelist bei Änderungen prüfen: https://docs.claude.com/en/api/ip-addresses
 
 ## Diagnose
 
 ```bash
-# Alle Container-Status
+# Status aller Container
 docker compose ps
 
-# Live-Logs
-docker compose logs -f
+# Caddy Logs (TLS-Fehler, Auth-Fehler)
+docker compose logs caddy --tail=50
 
-# Einzelne Services
-docker compose logs ib-gateway --tail=50
+# MCP-Server Logs
 docker compose logs ibkr-mcp-server --tail=20
-docker compose logs mcpo --tail=20
-docker compose logs caddy --tail=20
 
-# MCP-Verbindung testen (simuliert Open-WebUI/Claude.ai)
-curl -v -X POST https://mcp.deine-domain.de/mcp \
+# MCPO Logs
+docker compose logs mcpo --tail=20
+
+# Verbindungstest (simuliert Perplexity/OpenAI)
+curl -v -X POST https://deine-domain.de/mcp \
   -H "Authorization: Bearer DEIN_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -131,7 +119,7 @@ curl -v -X POST https://mcp.deine-domain.de/mcp \
 
 # MCPO OpenAPI-Schema prüfen
 curl -H "Authorization: Bearer DEIN_TOKEN" \
-  https://mcp.deine-domain.de/mcpo/ibkr/openapi.json
+  https://deine-domain.de/mcpo/ibkr/openapi.json
 
 # MCPO neu starten (bei Session-Problemen)
 docker compose restart mcpo
@@ -140,11 +128,12 @@ docker compose restart mcpo
 ## Dateistruktur
 
 ```
-ibkr-mcp-stack/
-├── docker-compose.yml   # Alle Services
-├── Caddyfile            # TLS + Routing + Auth
-├── .env                 # Zugangsdaten (nicht committen!)
-├── .env.example         # Template
+ibkr-mcp-server/
+├── docker-compose.yml   # Alle 4 Services
+├── Caddyfile            # TLS + Auth Template (__DOMAIN__ Platzhalter)
+├── .env.example         # Vorlage (cp zu .env, niemals committen!)
+├── .gitignore
+├── README.md
 └── mcpo/
-    └── config.json      # MCPO Server-Konfiguration
+    └── config.json      # MCPO → ibkr-mcp-server (intern)
 ```

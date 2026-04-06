@@ -9,12 +9,8 @@ name: ibkr-mcp-stack
 #  Caddy (TLS, Routing, Auth)
 #    ├── /mcp*   → Anthropic-IPs (Claude.ai) ODER Bearer-Token
 #    │              → ibkr-mcp-server:8000
-#    │              (Claude.ai via IP-Whitelist, Perplexity/OpenAI via Bearer)
 #    └── /mcpo*  → Bearer-Token → mcpo:8001 → ibkr-mcp-server:8000
 #                  (Open-WebUI via OpenAPI)
-#
-#  Alle Services kommunizieren intern über ibkr-internal Netzwerk.
-#  Der ibkr-mcp-server ist NICHT direkt aus dem Internet erreichbar.
 #
 #  Umschalten Paper ↔ Live: Nur .env Datei ändern!
 #    TRADING_MODE=paper  + IB_GATEWAY_PORT=4004
@@ -30,8 +26,8 @@ services:
     environment:
       TWS_USERID:                  ${TWS_USERID}
       TWS_PASSWORD:                ${TWS_PASSWORD}
-      TRADING_MODE:                ${TRADING_MODE}              # .env: paper | live
-      READ_ONLY_API:               ${READ_ONLY_API}             # .env: yes   (KRITISCH!)
+      TRADING_MODE:                ${TRADING_MODE}
+      READ_ONLY_API:               ${READ_ONLY_API}
       TWS_ACCEPT_INCOMING:         yes
       TWOFA_TIMEOUT_ACTION:        ${TWOFA_TIMEOUT_ACTION}
       RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT}
@@ -57,10 +53,9 @@ services:
   ibkr-mcp-server:
     image: ghcr.io/hellek1/ib-mcp:latest
     restart: always
-    # CLI-Argumente direkt übergeben – überschreibt interne Defaults des Images.
+    # CLI-Argumente überschreiben interne Image-Defaults.
     # IB_GATEWAY_PORT kommt aus .env:
-    #   Paper → 4004
-    #   Live  → 4003
+    #   Paper → 4004  |  Live → 4003
     command:
       - "--host"
       - "ib-gateway"
@@ -74,7 +69,6 @@ services:
       - "0.0.0.0"
       - "--http-port"
       - "8000"
-    # Kein externer Port-Expose – nur intern erreichbar
     networks:
       - ibkr-internal
     depends_on:
@@ -118,15 +112,26 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: always
+    # WICHTIG: entrypoint ersetzt __DOMAIN__ im Caddyfile-Template
+    # via sed bevor Caddy startet. Caddy löst {env.DOMAIN} im
+    # Site-Block-Label nicht zuverlässig auf – sed ist 100% sicher.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed "s/__DOMAIN__/$${DOMAIN}/g" /etc/caddy/Caddyfile.tmpl \
+          > /tmp/Caddyfile && \
+        exec caddy run --config /tmp/Caddyfile --adapter caddyfile
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"           # HTTP/3 (QUIC)
     environment:
-      MCP_SECRET_TOKEN: ${MCP_SECRET_TOKEN}
       DOMAIN:           ${DOMAIN}
+      MCP_SECRET_TOKEN: ${MCP_SECRET_TOKEN}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddyfile als Template mounten (entrypoint generiert finale Version)
+      - ./Caddyfile:/etc/caddy/Caddyfile.tmpl:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
