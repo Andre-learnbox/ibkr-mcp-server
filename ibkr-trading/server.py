@@ -628,6 +628,132 @@ async def place_option_order(
 
 
 # ===========================================================================
+@mcp.tool()
+async def get_option_chain(
+    symbol: str,
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> dict[str, Any]:
+    """Retrieve all available expirations and strikes for an underlying.
+
+    Uses reqSecDefOptParams (IBKR-recommended, no throttling).
+    Returns the chain skeleton – use get_option_price() to get
+    bid/ask/greeks for specific contracts.
+
+    Args:
+        symbol:   Underlying ticker (e.g. "MSFT", "SPY")
+        exchange: default "SMART"
+        currency: default "USD"
+
+    Returns:
+        chains: list of { exchange, tradingClass, multiplier,
+                          expirations (sorted), strikes (sorted) }
+        underlying: { conid, last_price }
+    """
+    async with _ib_connect() as ibc:
+        underlying = ib.Stock(symbol, exchange, currency)
+        await ibc.qualifyContractsAsync(underlying)
+
+        chains = await ibc.reqSecDefOptParamsAsync(
+            underlying.symbol, "", underlying.secType, underlying.conId
+        )
+
+        # Also fetch current underlying price for context
+        tickers = await ibc.reqTickersAsync(underlying)
+        under_price = tickers[0].marketPrice() if tickers else None
+
+        return {
+            "underlying": {
+                "symbol":  underlying.symbol,
+                "conid":   underlying.conId,
+                "price":   under_price,
+            },
+            "chains": [
+                {
+                    "exchange":     c.exchange,
+                    "tradingClass": c.tradingClass,
+                    "multiplier":   c.multiplier,
+                    "expirations":  sorted(c.expirations),
+                    "strikes":      sorted(c.strikes),
+                }
+                for c in chains
+            ],
+        }
+
+
+@mcp.tool()
+async def get_option_price(
+    symbol: str,
+    expiry: str,
+    strike: float,
+    right: str,
+    exchange: str = "SMART",
+    currency: str = "USD",
+) -> dict[str, Any]:
+    """Get current bid/ask/last and Greeks for a specific option contract.
+
+    Uses reqTickersAsync which returns modelGreeks (delta, gamma,
+    theta, vega, impliedVol) calculated by the IB model.
+
+    Args:
+        symbol:   Underlying ticker (e.g. "MSFT")
+        expiry:   YYYYMMDD  (e.g. "20260417")
+        strike:   Strike price (e.g. 360.0)
+        right:    "C" (call) or "P" (put)
+        exchange: default "SMART"
+        currency: default "USD"
+
+    Returns:
+        bid, ask, last, volume, openInterest,
+        modelGreeks: { delta, gamma, theta, vega, impliedVol, undPrice }
+    """
+    right = right.upper()
+    if right not in ("C", "P"):
+        raise ValueError(f"right must be C or P, got: {right!r}")
+
+    async with _ib_connect() as ibc:
+        contract = ib.Option(symbol, expiry, strike, right, exchange, currency=currency)
+        details = await ibc.reqContractDetailsAsync(contract)
+        if not details:
+            return {"error": f"No contract: {symbol} {expiry} {strike}{right}"}
+        qualified = details[0].contract
+
+        tickers = await ibc.reqTickersAsync(qualified)
+        if not tickers:
+            return {"error": "No market data returned"}
+        t = tickers[0]
+
+        def _greeks(g: ib.OptionComputation | None) -> dict[str, Any] | None:
+            if g is None:
+                return None
+            return {
+                "delta":      g.delta,
+                "gamma":      g.gamma,
+                "theta":      g.theta,
+                "vega":       g.vega,
+                "impliedVol": g.impliedVol,
+                "optPrice":   g.optPrice,
+                "undPrice":   g.undPrice,
+            }
+
+        return {
+            "symbol":       symbol,
+            "expiry":       expiry,
+            "strike":       strike,
+            "right":        right,
+            "conid":        qualified.conId,
+            "bid":          t.bid,
+            "ask":          t.ask,
+            "last":         t.last,
+            "close":        t.close,
+            "volume":       t.volume,
+            "openInterest": getattr(t, "openInterest", None),
+            "modelGreeks":  _greeks(t.modelGreeks),
+            "bidGreeks":    _greeks(t.bidGreeks),
+            "askGreeks":    _greeks(t.askGreeks),
+        }
+
+
 # Entry point  –  must be LAST so all @mcp.tool() decorators run first
 # ===========================================================================
 
