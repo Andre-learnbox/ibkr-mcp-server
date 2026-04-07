@@ -28,7 +28,8 @@ services:
       TWS_PASSWORD:                ${TWS_PASSWORD}
       TRADING_MODE:                ${TRADING_MODE}
       READ_ONLY_API:               ${READ_ONLY_API}
-      TWS_ACCEPT_INCOMING:         yes
+      TWS_ACCEPT_INCOMING:         accept
+      BYPASS_WARNING:              yes
       TWOFA_TIMEOUT_ACTION:        ${TWOFA_TIMEOUT_ACTION}
       RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT}
       AUTO_RESTART_TIME:           ${AUTO_RESTART_TIME}
