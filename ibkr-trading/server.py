@@ -658,9 +658,11 @@ async def get_option_chain(
             underlying.symbol, "", underlying.secType, underlying.conId
         )
 
-        # Also fetch current underlying price for context
-        tickers = await ibc.reqTickersAsync(underlying)
-        under_price = tickers[0].marketPrice() if tickers else None
+        # Fetch current underlying price via reqMktData (works even without watchlist)
+        under_ticker = ibc.reqMktData(underlying, genericTickList="", snapshot=False)
+        await asyncio.sleep(2)
+        ibc.cancelMktData(underlying)
+        under_price = under_ticker.marketPrice() if under_ticker else None
 
         return {
             "underlying": {
@@ -718,10 +720,13 @@ async def get_option_price(
             return {"error": f"No contract: {symbol} {expiry} {strike}{right}"}
         qualified = details[0].contract
 
-        tickers = await ibc.reqTickersAsync(qualified)
-        if not tickers:
-            return {"error": "No market data returned"}
-        t = tickers[0]
+        # reqMktData snapshot=True requests a one-time data snapshot.
+        # We wait briefly for data to arrive, then cancel the subscription.
+        # genericTickList="" → IBKR sends default ticks incl. Greeks for OPT contracts.
+        ticker = ibc.reqMktData(qualified, genericTickList="", snapshot=False)
+        await asyncio.sleep(3)          # allow time for Greeks + bid/ask
+        ibc.cancelMktData(qualified)
+        t = ticker
 
         def _greeks(g: ib.OptionComputation | None) -> dict[str, Any] | None:
             if g is None:
